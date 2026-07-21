@@ -352,13 +352,14 @@ public class MainActivity extends AppCompatActivity {
             return false;
         }
         try {
+            ensureDefaultConfigValues();
             this.config.put("allowList", new JSONArray(this.allowList));
             boolean saved = pref.edit()
                     .putBoolean("init", true)
                     .putStringSet("allowList", new HashSet<>(this.allowList))
-                    .putBoolean("disableAutoCleanNotification", this.config.getBoolean("disableAutoCleanNotification"))
-                    .putBoolean("includeIceBoxDisableApp", this.config.getBoolean("includeIceBoxDisableApp"))
-                    .putBoolean("noResponseNotification", this.config.getBoolean("noResponseNotification"))
+                    .putBoolean("disableAutoCleanNotification", this.config.optBoolean("disableAutoCleanNotification", false))
+                    .putBoolean("includeIceBoxDisableApp", this.config.optBoolean("includeIceBoxDisableApp", false))
+                    .putBoolean("noResponseNotification", this.config.optBoolean("noResponseNotification", false))
                     .commit();
             if (!saved) {
                 new AlertDialog.Builder(this).setTitle("更新配置文件失败").setMessage("配置写入失败").show();
