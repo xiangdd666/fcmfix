@@ -76,27 +76,7 @@ public class MainActivity extends AppCompatActivity {
                 @Override
                 public void onServiceBind(@NonNull XposedService service) {
                     xposedService = service;
-                    runOnUiThread(() -> {
-                        loadConfigFromRemotePreferences();
-                        // 服务连上后，把绑定前点击产生的待应用变更落盘
-                        if (!pendingAdd.isEmpty() || !pendingRemove.isEmpty()) {
-                            for (String p : pendingAdd) {
-                                allowList.add(p);
-                            }
-                            for (String p : pendingRemove) {
-                                allowList.remove(p);
-                            }
-                            pendingAdd.clear();
-                            pendingRemove.clear();
-                            try {
-                                updateConfig();
-                            } catch (Throwable e) {
-                                Log.e("applyPending", e.toString());
-                            }
-                        }
-                        // 重建列表，使已存配置正确显示（而非仅 notify 不刷新勾选）
-                        buildAndSetAdapter();
-                    });
+                    runOnUiThread(MainActivity.this::refreshList);
                 }
 
                 @Override
@@ -300,9 +280,9 @@ public class MainActivity extends AppCompatActivity {
         }
 
         new Handler().postDelayed(() -> {
-            // 若服务已先行连上并构建过列表，则不再重复构建
+            // 若服务已连上则加载配置并构建列表；否则等 onServiceBind 或 onResume 兜底
             if (appListAdapter == null) {
-                buildAndSetAdapter();
+                refreshList();
             }
         }, 1000);
     }
@@ -311,6 +291,44 @@ public class MainActivity extends AppCompatActivity {
     @Override
     public View onCreateView(@Nullable View parent, @NonNull String name, @NonNull Context context, @NonNull AttributeSet attrs) {
         return super.onCreateView(parent, name, context, attrs);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // 回到前台时若列表尚未构建且服务已连上，则补加载配置
+        // 修复：Activity 重建后 onServiceBind 不再回调，导致 allowList 为空、勾选不显示
+        if (appListAdapter == null && xposedService != null) {
+            refreshList();
+        }
+    }
+
+    /**
+     * 统一入口：加载远程配置 + 应用绑定前待落盘变更 + 重建列表。
+     * 在 onServiceBind / postDelayed 兜底 / onResume 兜底 三处调用，
+     * 确保无论服务何时连上、Activity 是否重建，配置都能正确读回并显示。
+     */
+    private void refreshList() {
+        if (xposedService == null) {
+            return;
+        }
+        loadConfigFromRemotePreferences();
+        if (!pendingAdd.isEmpty() || !pendingRemove.isEmpty()) {
+            for (String p : pendingAdd) {
+                allowList.add(p);
+            }
+            for (String p : pendingRemove) {
+                allowList.remove(p);
+            }
+            pendingAdd.clear();
+            pendingRemove.clear();
+            try {
+                updateConfig();
+            } catch (Throwable e) {
+                Log.e("applyPending", e.toString());
+            }
+        }
+        buildAndSetAdapter();
     }
 
     private void buildAndSetAdapter() {

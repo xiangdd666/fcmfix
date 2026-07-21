@@ -133,6 +133,7 @@ system_server 侧 `isBootComplete` 要等 60 秒线程才置 true，期间所有
 | #9 | `getStringSet` 不可变集合 | 包一层 `new HashSet<>()` |
 | #10 | BroadcastFix 单 `&` 误用 | 改为 `&&` |
 | #13 | MainActivity 过时 config.json 提示 | 改为 LSPosed 远程 Preferences 说明 |
+| #16 | `updateConfig` 用 `config.getBoolean` 读空 JSONObject 抛 JSONException，导致 `commit()` 未执行、配置写不进 | 写盘前 `ensureDefaultConfigValues()` 兜底；三处 `getBoolean` 改 `optBoolean(key, false)` |
 
 ### 新增 #15（运行时日志实锤）：ReconnectManagerFix `getWindow` NoSuchMethodError
 **文件**：`ReconnectManagerFix.java`（原 `addButton()` 第 303 行）
@@ -144,3 +145,10 @@ system_server 侧 `isBootComplete` 要等 60 秒线程才置 true，期间所有
 > 共性问题提醒：`libxposed` 的 `callMethod` / `callStaticMethod` 不递归父类，是标准 LSPosed 的差异点。代码库内另两处 `callMethod`（`OplusProxyFix.unfreezeIfNeed` 一加专属、`AutoStartFix.checkAbnormalBroadcastInQueueLocked` AMS 自身声明方法）在当前小米 Android 16 环境不触发此坑，但后续若遇同类 `NoSuchMethodError` 可优先排查此根因；必要时将 `findBestMethod` 改为递归父类可根治。
 
 > ⚠️ 本机无 Android SDK，未编译验证；请在实机/有 SDK 环境出包后验证。
+
+### 新增 #16（安装后实锤）：勾选应用弹「更新配置文件失败 No value for disableAutoCleanNotification」
+**文件**：`MainActivity.java` → `updateConfig()`
+**现象**：安装后勾选任意应用，弹窗「更新配置文件失败 No value for disableAutoCleanNotification」，且勾选未保存。
+**根因**：`updateConfig()` 用 `this.config.getBoolean("disableAutoCleanNotification")` 读开关；`config` 初始为**空 `JSONObject`**，该 key 不存在时 `JSONObject.getBoolean` 抛 `JSONException: No value for ...`，使 `commit()` 根本没执行。
+之所以 `config` 会为空：本类 `xposedService` 是**静态字段**；当 Activity 被重建（被杀后台/旋转屏）而 LSPosed 服务早已连上时，`onServiceBind` 不再触发，`loadConfigFromRemotePreferences()`（其内 `ensureDefaultConfigValues()` 才会给 `config` 填默认值）不会被调用，于是 `config` 是新实例的空对象，而 `xposedService != null` 让点击直接走 `updateConfig()` → 抛异常。
+**修复**：`updateConfig()` 写盘前先调 `ensureDefaultConfigValues()` 兜底；三处 `config.getBoolean(key)` 全部改为 `config.optBoolean(key, false)`（key 缺失返回默认 `false`、不抛异常）。如此无论 `config` 是否被填充，勾选都能正常落盘。
