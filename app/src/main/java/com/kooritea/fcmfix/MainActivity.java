@@ -54,9 +54,8 @@ public class MainActivity extends AppCompatActivity {
     private static XposedService xposedService;
     Set<String> allowList = new HashSet<>();
     JSONObject config = new JSONObject();
-    // 服务未连上时的待应用队列：点击先入队，onServiceBind 后再落盘
-    private final Set<String> pendingAdd = new HashSet<>();
-    private final Set<String> pendingRemove = new HashSet<>();
+    // 本地配置：UI 的可靠来源，不依赖 LSPosed 远程通道（Android 16 上 XposedService 连接不稳）
+    private SharedPreferences localPref;
 
     private SharedPreferences getRemotePreferencesOrNull() {
         if (xposedService == null) {
@@ -76,7 +75,7 @@ public class MainActivity extends AppCompatActivity {
                 @Override
                 public void onServiceBind(@NonNull XposedService service) {
                     xposedService = service;
-                    runOnUiThread(MainActivity.this::refreshList);
+                    runOnUiThread(() -> flushToRemote());
                 }
 
                 @Override
@@ -89,6 +88,10 @@ public class MainActivity extends AppCompatActivity {
         } catch (Throwable e) {
             Log.e("initXposedService", e.toString());
         }
+    }
+
+    private void initLocalPref() {
+        localPref = getSharedPreferences("config", MODE_PRIVATE);
     }
 
     private void ensureDefaultConfigValues() {
@@ -110,22 +113,18 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void loadConfigFromRemotePreferences() {
-        ensureDefaultConfigValues();
-        SharedPreferences pref = getRemotePreferencesOrNull();
-        if (pref == null) {
-            return;
-        }
+    private void loadConfig() {
         this.allowList.clear();
-        this.allowList.addAll(pref.getStringSet("allowList", new HashSet<>()));
+        this.allowList.addAll(localPref.getStringSet("allowList", new HashSet<>()));
         try {
             this.config.put("allowList", new JSONArray(this.allowList));
-            this.config.put("disableAutoCleanNotification", pref.getBoolean("disableAutoCleanNotification", false));
-            this.config.put("includeIceBoxDisableApp", pref.getBoolean("includeIceBoxDisableApp", false));
-            this.config.put("noResponseNotification", pref.getBoolean("noResponseNotification", false));
+            this.config.put("disableAutoCleanNotification", localPref.getBoolean("disableAutoCleanNotification", false));
+            this.config.put("includeIceBoxDisableApp", localPref.getBoolean("includeIceBoxDisableApp", false));
+            this.config.put("noResponseNotification", localPref.getBoolean("noResponseNotification", false));
         } catch (JSONException e) {
-            Log.e("loadRemoteConfig", e.toString());
+            Log.e("loadConfig", e.toString());
         }
+        ensureDefaultConfigValues();
     }
 
     private class AppInfo {
@@ -271,6 +270,8 @@ public class MainActivity extends AppCompatActivity {
         recyclerView.setLayoutManager(new LinearLayoutManager(this));
 
         initXposedService();
+        initLocalPref();
+        ensureDefaultConfigValues();
 
         try {
             if (ContextCompat.checkSelfPermission(this, IceboxUtils.SDK_PERMISSION) != PackageManager.PERMISSION_GRANTED) {
@@ -279,8 +280,8 @@ public class MainActivity extends AppCompatActivity {
         } catch (Throwable ignored) {
         }
 
+        // 本地配置始终可用，1s 后用本地配置构建列表（不依赖 LSPosed 远程通道）
         new Handler().postDelayed(() -> {
-            // 若服务已连上则加载配置并构建列表；否则等 onServiceBind 或 onResume 兜底
             if (appListAdapter == null) {
                 refreshList();
             }
@@ -296,9 +297,8 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
-        // 回到前台时若列表尚未构建且服务已连上，则补加载配置
-        // 修复：Activity 重建后 onServiceBind 不再回调，导致 allowList 为空、勾选不显示
-        if (appListAdapter == null && xposedService != null) {
+        // 回到前台时若列表尚未构建，用本地配置补加载（不依赖远程通道，修复重建后勾选不显示）
+        if (appListAdapter == null) {
             refreshList();
         }
     }
@@ -309,25 +309,7 @@ public class MainActivity extends AppCompatActivity {
      * 确保无论服务何时连上、Activity 是否重建，配置都能正确读回并显示。
      */
     private void refreshList() {
-        if (xposedService == null) {
-            return;
-        }
-        loadConfigFromRemotePreferences();
-        if (!pendingAdd.isEmpty() || !pendingRemove.isEmpty()) {
-            for (String p : pendingAdd) {
-                allowList.add(p);
-            }
-            for (String p : pendingRemove) {
-                allowList.remove(p);
-            }
-            pendingAdd.clear();
-            pendingRemove.clear();
-            try {
-                updateConfig();
-            } catch (Throwable e) {
-                Log.e("applyPending", e.toString());
-            }
-        }
+        loadConfig();
         buildAndSetAdapter();
     }
 
@@ -339,12 +321,6 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void addAppInAllowList(String packageName){
-        if (xposedService == null) {
-            // 服务未连上：先入队，绑定后由 onServiceBind 落盘；UI 勾选由实时 allowList 驱动
-            pendingAdd.add(packageName);
-            pendingRemove.remove(packageName);
-            return;
-        }
         this.allowList.add(packageName);
         if (!updateConfig()) {
             this.allowList.remove(packageName); // 写盘失败则回滚内存，保证 UI 与磁盘一致
@@ -352,11 +328,6 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void deleteAppInAllowList(String packageName){
-        if (xposedService == null) {
-            pendingRemove.add(packageName);
-            pendingAdd.remove(packageName);
-            return;
-        }
         this.allowList.remove(packageName);
         if (!updateConfig()) {
             this.allowList.add(packageName); // 回滚
@@ -364,15 +335,11 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private boolean updateConfig(){
-        SharedPreferences pref = getRemotePreferencesOrNull();
-        if (pref == null) {
-            new AlertDialog.Builder(this).setTitle("更新配置文件失败").setMessage("XposedService 未连接，无法写入远程配置").show();
-            return false;
-        }
         try {
             ensureDefaultConfigValues();
             this.config.put("allowList", new JSONArray(this.allowList));
-            boolean saved = pref.edit()
+            // 1) 本地 SharedPreferences 始终写入 —— UI 的可靠来源，不依赖 LSPosed 远程通道
+            boolean saved = localPref.edit()
                     .putBoolean("init", true)
                     .putStringSet("allowList", new HashSet<>(this.allowList))
                     .putBoolean("disableAutoCleanNotification", this.config.optBoolean("disableAutoCleanNotification", false))
@@ -380,15 +347,36 @@ public class MainActivity extends AppCompatActivity {
                     .putBoolean("noResponseNotification", this.config.optBoolean("noResponseNotification", false))
                     .commit();
             if (!saved) {
-                new AlertDialog.Builder(this).setTitle("更新配置文件失败").setMessage("配置写入失败").show();
+                new AlertDialog.Builder(this).setTitle("更新配置文件失败").setMessage("本地配置写入失败").show();
                 return false;
             }
-            this.sendBroadcast(new Intent("com.kooritea.fcmfix.update.config"));
+            // 2) 尽力同步到 LSPosed 远程 Preferences（system_server 侧读取）。连接不上时静默，待 onServiceBind 时再 flush
+            flushToRemote();
             return true;
         } catch (Throwable e) {
             Log.e("updateConfig", e.toString());
             new AlertDialog.Builder(this).setTitle("更新配置文件失败").setMessage(e.getMessage()).show();
             return false;
+        }
+    }
+
+    /** 把本地配置同步到 LSPosed 远程 Preferences（system_server 读取用）。服务未连上时静默返回。 */
+    private void flushToRemote() {
+        SharedPreferences remote = getRemotePreferencesOrNull();
+        if (remote == null) {
+            return;
+        }
+        try {
+            remote.edit()
+                    .putBoolean("init", true)
+                    .putStringSet("allowList", new HashSet<>(this.allowList))
+                    .putBoolean("disableAutoCleanNotification", this.config.optBoolean("disableAutoCleanNotification", false))
+                    .putBoolean("includeIceBoxDisableApp", this.config.optBoolean("includeIceBoxDisableApp", false))
+                    .putBoolean("noResponseNotification", this.config.optBoolean("noResponseNotification", false))
+                    .commit();
+            this.sendBroadcast(new Intent("com.kooritea.fcmfix.update.config"));
+        } catch (Throwable e) {
+            Log.e("flushToRemote", e.toString());
         }
     }
 

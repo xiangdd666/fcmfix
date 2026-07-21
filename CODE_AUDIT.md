@@ -134,6 +134,7 @@ system_server 侧 `isBootComplete` 要等 60 秒线程才置 true，期间所有
 | #10 | BroadcastFix 单 `&` 误用 | 改为 `&&` |
 | #13 | MainActivity 过时 config.json 提示 | 改为 LSPosed 远程 Preferences 说明 |
 | #16 | `updateConfig` 用 `config.getBoolean` 读空 JSONObject 抛 JSONException，导致 `commit()` 未执行、配置写不进 | 写盘前 `ensureDefaultConfigValues()` 兜底；三处 `getBoolean` 改 `optBoolean(key, false)` |
+| #17 | 配置读写强依赖 `XposedService` 远程通道，Activity 重建后 `refreshList` 因服务未连上而空返回，勾选丢失 | UI 读写改走 App 自身 `SharedPreferences`（本地，永远可用）；远程 Preferences 仅作 system_server 同步的"尽力而为"职责，`onServiceBind` 时 flush |
 
 ### 新增 #15（运行时日志实锤）：ReconnectManagerFix `getWindow` NoSuchMethodError
 **文件**：`ReconnectManagerFix.java`（原 `addButton()` 第 303 行）
@@ -152,3 +153,16 @@ system_server 侧 `isBootComplete` 要等 60 秒线程才置 true，期间所有
 **根因**：`updateConfig()` 用 `this.config.getBoolean("disableAutoCleanNotification")` 读开关；`config` 初始为**空 `JSONObject`**，该 key 不存在时 `JSONObject.getBoolean` 抛 `JSONException: No value for ...`，使 `commit()` 根本没执行。
 之所以 `config` 会为空：本类 `xposedService` 是**静态字段**；当 Activity 被重建（被杀后台/旋转屏）而 LSPosed 服务早已连上时，`onServiceBind` 不再触发，`loadConfigFromRemotePreferences()`（其内 `ensureDefaultConfigValues()` 才会给 `config` 填默认值）不会被调用，于是 `config` 是新实例的空对象，而 `xposedService != null` 让点击直接走 `updateConfig()` → 抛异常。
 **修复**：`updateConfig()` 写盘前先调 `ensureDefaultConfigValues()` 兜底；三处 `config.getBoolean(key)` 全部改为 `config.optBoolean(key, false)`（key 缺失返回默认 `false`、不抛异常）。如此无论 `config` 是否被填充，勾选都能正常落盘。
+
+### 新增 #17（用户多次复现"勾选后返回没了"）：配置存储强依赖 LSPosed 远程通道
+**文件**：`MainActivity.java`
+**现象**：勾选应用、返回再打开，应用未被勾选（之前 `#1/#2/#16` 的修复仍未能根治）。
+**根因**：`loadConfigFromRemotePreferences()`（读）与 `updateConfig()`（写）全部走 `xposedService.getRemotePreferences("config")`；而 `refreshList()` 第一行 `if (xposedService == null) return;`。在 Android 16 上 App 侧 `XposedService` 绑定时机不稳/偏晚，Activity 重建后 `onServiceBind` 未回调或 `onResume` 时服务仍为空，`refreshList()` 直接空返回 → 用空 `allowList` 建列表 → 全不勾选。`libxposed` 也没有 `XSharedPreferences`，无法用标准只读共享方案替代。
+**修复**：
+- 新增 `localPref = getSharedPreferences("config", MODE_PRIVATE)`，作为 **UI 的可靠来源**。
+- `loadConfig()` 改读本地 `localPref`（不再依赖服务）；`updateConfig()` 先写本地 `localPref` 再 `flushToRemote()` 尽力同步到远程。
+- `refreshList()` / `onResume` / `onCreate` 兜底**移除对 `xposedService == null` 的提前返回**，始终用本地配置构建列表。
+- `onServiceBind` 时调用 `flushToRemote()`：把本地配置推到远程 Preferences 并发 `com.kooritea.fcmfix.update.config` 广播，使 system_server 侧 `onUpdateConfig` 能读到最新 allowList。
+- 移除"待应用队列"（`pendingAdd`/`pendingRemove`）与"XposedService 未连接"弹窗——本地写入永远成功，远程同步失败静默处理。
+**效果**：勾选一定存得住、读得回，与 `XposedService` 连不连上无关。若 `XposedService` 始终连不上，UI 仍正确，但 system_server 侧配置需等服务连上后 flush 才生效（属原模块的固有跨进程依赖）。
+
