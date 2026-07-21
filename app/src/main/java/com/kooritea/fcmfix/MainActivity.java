@@ -50,9 +50,13 @@ import com.kooritea.fcmfix.util.IceboxUtils;
 
 public class MainActivity extends AppCompatActivity {
     private AppListAdapter appListAdapter;
+    private RecyclerView recyclerView;
     private static XposedService xposedService;
     Set<String> allowList = new HashSet<>();
     JSONObject config = new JSONObject();
+    // 服务未连上时的待应用队列：点击先入队，onServiceBind 后再落盘
+    private final Set<String> pendingAdd = new HashSet<>();
+    private final Set<String> pendingRemove = new HashSet<>();
 
     private SharedPreferences getRemotePreferencesOrNull() {
         if (xposedService == null) {
@@ -74,9 +78,24 @@ public class MainActivity extends AppCompatActivity {
                     xposedService = service;
                     runOnUiThread(() -> {
                         loadConfigFromRemotePreferences();
-                        if (appListAdapter != null) {
-                            appListAdapter.notifyDataSetChanged();
+                        // 服务连上后，把绑定前点击产生的待应用变更落盘
+                        if (!pendingAdd.isEmpty() || !pendingRemove.isEmpty()) {
+                            for (String p : pendingAdd) {
+                                allowList.add(p);
+                            }
+                            for (String p : pendingRemove) {
+                                allowList.remove(p);
+                            }
+                            pendingAdd.clear();
+                            pendingRemove.clear();
+                            try {
+                                updateConfig();
+                            } catch (Throwable e) {
+                                Log.e("applyPending", e.toString());
+                            }
                         }
+                        // 重建列表，使已存配置正确显示（而非仅 notify 不刷新勾选）
+                        buildAndSetAdapter();
                     });
                 }
 
@@ -167,7 +186,6 @@ public class MainActivity extends AppCompatActivity {
 
         public AppListAdapter(){
             Set<String> allowListSet = new HashSet<>(allowList);
-            allowListSet.containsAll(allowList);
             List<AppInfo> _allowList = new ArrayList<>();
             List<AppInfo> _notAllowList = new ArrayList<>();
             List<AppInfo> _notFoundFcm = new ArrayList<>();
@@ -219,7 +237,7 @@ public class MainActivity extends AppCompatActivity {
             if(_allowList.size() == 0 || _allowList.isEmpty() ||(_allowList.size() == 1 && "com.kooritea.fcmfix".equals(_allowList.get(0).packageName))){
                 new AlertDialog.Builder(MainActivity.this)
                         .setTitle("请在系统设置中授予读取应用列表权限")
-                        .setMessage("或直接编辑" + getApplicationContext().getFilesDir().getAbsolutePath() + "/config.json(需重启生效)")
+                        .setMessage("请确认 LSPosed 框架已激活，且本模块作用域已勾选「系统框架」；配置通过 LSPosed 远程 Preferences 存储。")
                         .setPositiveButton("确定", (dialog, which) -> {})
                         .show();
             }
@@ -236,12 +254,13 @@ public class MainActivity extends AppCompatActivity {
             holder.appView.setOnClickListener(v -> {
                 int position = holder.getBindingAdapterPosition();
                 AppInfo appInfo = mAppList.get(position);
-                if(appInfo.isAllow){
-                    deleteAppInAllowList(appInfo.packageName);
-                }else{
+                boolean willAllow = !allowList.contains(appInfo.packageName);
+                if (willAllow) {
                     addAppInAllowList(appInfo.packageName);
+                } else {
+                    deleteAppInAllowList(appInfo.packageName);
                 }
-                appInfo.isAllow = !appInfo.isAllow;
+                // 勾选状态由实时 allowList 驱动（见 onBindViewHolder），写入失败时不会误显示
                 appListAdapter.notifyDataSetChanged();
             });
             return holder;
@@ -254,7 +273,7 @@ public class MainActivity extends AppCompatActivity {
             holder.name.setText(appInfo.name);
             holder.packageName.setText(appInfo.packageName);
             holder.includeFcm.setVisibility(appInfo.includeFcm ? View.VISIBLE : View.GONE);
-            holder.isAllow.setChecked(appInfo.isAllow);
+            holder.isAllow.setChecked(allowList.contains(appInfo.packageName));
         }
 
         @Override
@@ -268,7 +287,7 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
-        RecyclerView recyclerView = findViewById(R.id.recycler_view);
+        recyclerView = findViewById(R.id.recycler_view);
         recyclerView.setLayoutManager(new LinearLayoutManager(this));
 
         initXposedService();
@@ -281,10 +300,10 @@ public class MainActivity extends AppCompatActivity {
         }
 
         new Handler().postDelayed(() -> {
-            appListAdapter = new AppListAdapter();
-            recyclerView.setAdapter(appListAdapter);
-            findViewById(R.id.progress_bar).setVisibility(View.GONE);
-            recyclerView.setVisibility(View.VISIBLE);
+            // 若服务已先行连上并构建过列表，则不再重复构建
+            if (appListAdapter == null) {
+                buildAndSetAdapter();
+            }
         }, 1000);
     }
 
@@ -294,21 +313,45 @@ public class MainActivity extends AppCompatActivity {
         return super.onCreateView(parent, name, context, attrs);
     }
 
-    private void addAppInAllowList(String packageName){
-        this.allowList.add(packageName);
-        this.updateConfig();
-    }
-    private void deleteAppInAllowList(String packageName){
-        this.allowList.remove(packageName);
-        this.updateConfig();
+    private void buildAndSetAdapter() {
+        appListAdapter = new AppListAdapter();
+        recyclerView.setAdapter(appListAdapter);
+        findViewById(R.id.progress_bar).setVisibility(View.GONE);
+        recyclerView.setVisibility(View.VISIBLE);
     }
 
-    private void updateConfig(){
+    private void addAppInAllowList(String packageName){
+        if (xposedService == null) {
+            // 服务未连上：先入队，绑定后由 onServiceBind 落盘；UI 勾选由实时 allowList 驱动
+            pendingAdd.add(packageName);
+            pendingRemove.remove(packageName);
+            return;
+        }
+        this.allowList.add(packageName);
+        if (!updateConfig()) {
+            this.allowList.remove(packageName); // 写盘失败则回滚内存，保证 UI 与磁盘一致
+        }
+    }
+
+    private void deleteAppInAllowList(String packageName){
+        if (xposedService == null) {
+            pendingRemove.add(packageName);
+            pendingAdd.remove(packageName);
+            return;
+        }
+        this.allowList.remove(packageName);
+        if (!updateConfig()) {
+            this.allowList.add(packageName); // 回滚
+        }
+    }
+
+    private boolean updateConfig(){
+        SharedPreferences pref = getRemotePreferencesOrNull();
+        if (pref == null) {
+            new AlertDialog.Builder(this).setTitle("更新配置文件失败").setMessage("XposedService 未连接，无法写入远程配置").show();
+            return false;
+        }
         try {
-            SharedPreferences pref = getRemotePreferencesOrNull();
-            if (pref == null) {
-                throw new IllegalStateException("XposedService 未连接，无法写入远程配置");
-            }
             this.config.put("allowList", new JSONArray(this.allowList));
             boolean saved = pref.edit()
                     .putBoolean("init", true)
@@ -318,12 +361,15 @@ public class MainActivity extends AppCompatActivity {
                     .putBoolean("noResponseNotification", this.config.getBoolean("noResponseNotification"))
                     .commit();
             if (!saved) {
-                throw new IllegalStateException("配置写入失败");
+                new AlertDialog.Builder(this).setTitle("更新配置文件失败").setMessage("配置写入失败").show();
+                return false;
             }
             this.sendBroadcast(new Intent("com.kooritea.fcmfix.update.config"));
+            return true;
         } catch (Throwable e) {
-            Log.e("updateConfig",e.toString());
+            Log.e("updateConfig", e.toString());
             new AlertDialog.Builder(this).setTitle("更新配置文件失败").setMessage(e.getMessage()).show();
+            return false;
         }
     }
 
@@ -378,7 +424,6 @@ public class MainActivity extends AppCompatActivity {
                     for(AppInfo appInfo : appListAdapter.mAppList){
                         if(appInfo.includeFcm){
                             addAppInAllowList(appInfo.packageName);
-                            appInfo.isAllow = true;
                         }
                     }
                     appListAdapter.notifyDataSetChanged();

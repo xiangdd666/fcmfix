@@ -1,11 +1,11 @@
 package com.kooritea.fcmfix.xposed;
 
 import android.annotation.SuppressLint;
+import android.app.Activity;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
-import android.content.ContextWrapper;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
@@ -31,8 +31,9 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.Parameter;
-import java.util.Timer;
-import java.util.TimerTask;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import com.kooritea.fcmfix.libxposed.XC_MethodHook;
 import com.kooritea.fcmfix.libxposed.XposedBridge;
 import com.kooritea.fcmfix.libxposed.XposedHelpers;
@@ -43,6 +44,8 @@ public class ReconnectManagerFix extends XposedModule {
     private Class<?> GcmChimeraService;
     private String GcmChimeraServiceLogMethodName;
     private Boolean startHookFlag = false;
+    // 复用单例调度器，避免每个 GCM 闹钟都 new 一个 Timer 线程
+    private static final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
 
 
     public ReconnectManagerFix(ClassLoader classLoader) {
@@ -201,19 +204,15 @@ public class ReconnectManagerFix extends XposedModule {
                             }
                         }
                     }
-                    final Timer timer = new Timer("ReconnectManagerFix");
                     final Field finalMaxField = maxField;
-                    timer.schedule(new TimerTask() {
-                        @Override
-                        public void run() {
-                            long nextConnectionTime = XposedHelpers.getLongField(param.thisObject, finalMaxField.getName());
-                            if (nextConnectionTime != 0 && nextConnectionTime - SystemClock.elapsedRealtime() < -60000) {
-                                context.sendBroadcast(new Intent("com.google.android.intent.action.GCM_RECONNECT"));
-                                printLog("Send broadcast GCM_RECONNECT", true);
-                            }
-                            timer.cancel();
+                    final long delayMs = (long) param.args[0] + 5000;
+                    scheduler.schedule(() -> {
+                        long nextConnectionTime = XposedHelpers.getLongField(param.thisObject, finalMaxField.getName());
+                        if (nextConnectionTime != 0 && nextConnectionTime - SystemClock.elapsedRealtime() < -60000) {
+                            context.sendBroadcast(new Intent("com.google.android.intent.action.GCM_RECONNECT"));
+                            printLog("Send broadcast GCM_RECONNECT", true);
                         }
-                    }, (long) param.args[0] + 5000);
+                    }, delayMs, TimeUnit.MILLISECONDS);
                 }
             }
         });
@@ -300,28 +299,42 @@ public class ReconnectManagerFix extends XposedModule {
             @SuppressLint("SetTextI18n")
             @Override
             protected void afterHookedMethod(final MethodHookParam param) {
-                ViewGroup viewGroup = ((Window)XposedHelpers.callMethod(param.thisObject, "getWindow")).getDecorView().findViewById(android.R.id.content);
-                LinearLayout linearLayout = (LinearLayout)viewGroup.getChildAt(0);
-                LinearLayout linearLayout2 = (LinearLayout)linearLayout.getChildAt(0);
+                try {
+                    if (!(param.thisObject instanceof Activity)) {
+                        printLog("GcmChimeraDiagnostics 非 Activity 实例，跳过注入诊断按钮", true);
+                        return;
+                    }
+                    Activity activity = (Activity) param.thisObject;
+                    Window window = activity.getWindow();
+                    ViewGroup viewGroup = window.getDecorView().findViewById(android.R.id.content);
+                    if (viewGroup == null || viewGroup.getChildCount() < 1) {
+                        printLog("诊断界面布局异常，跳过注入按钮", true);
+                        return;
+                    }
+                    LinearLayout linearLayout = (LinearLayout) viewGroup.getChildAt(0);
+                    LinearLayout linearLayout2 = (LinearLayout) linearLayout.getChildAt(0);
 
-                Button reConnectButton = new Button((ContextWrapper)param.thisObject);
-                reConnectButton.setText("RECONNECT");
-                reConnectButton.setOnClickListener(view -> {
-                    context.sendBroadcast(new Intent("com.google.android.intent.action.GCM_RECONNECT"));
-                    printLog("Send broadcast GCM_RECONNECT", true);
-                });
-                linearLayout2.addView(reConnectButton);
+                    Button reConnectButton = new Button(activity);
+                    reConnectButton.setText("RECONNECT");
+                    reConnectButton.setOnClickListener(view -> {
+                        context.sendBroadcast(new Intent("com.google.android.intent.action.GCM_RECONNECT"));
+                        printLog("Send broadcast GCM_RECONNECT", true);
+                    });
+                    linearLayout2.addView(reConnectButton);
 
-                Button openFcmFixButton = new Button((ContextWrapper)param.thisObject);
-                openFcmFixButton.setText("打开FCMFIX");
-                openFcmFixButton.setOnClickListener(view -> {
-                    Intent intent = new Intent(Intent.ACTION_VIEW);
-                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                    intent.setPackage("com.kooritea.fcmfix");
-                    intent.setComponent(new ComponentName("com.kooritea.fcmfix","com.kooritea.fcmfix.MainActivity"));
-                    context.startActivity(intent);
-                });
-                linearLayout2.addView(openFcmFixButton);
+                    Button openFcmFixButton = new Button(activity);
+                    openFcmFixButton.setText("打开FCMFIX");
+                    openFcmFixButton.setOnClickListener(view -> {
+                        Intent intent = new Intent(Intent.ACTION_VIEW);
+                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        intent.setPackage("com.kooritea.fcmfix");
+                        intent.setComponent(new ComponentName("com.kooritea.fcmfix", "com.kooritea.fcmfix.MainActivity"));
+                        context.startActivity(intent);
+                    });
+                    linearLayout2.addView(openFcmFixButton);
+                } catch (Throwable t) {
+                    printLog("注入诊断界面按钮失败: " + t.getMessage(), true);
+                }
             }
         });
     }

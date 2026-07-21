@@ -113,6 +113,9 @@ public class AutoStartFix extends XposedModule {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam methodHookParam) {
                     Intent intent = (Intent) methodHookParam.args[1];
+                    if (intent.getComponent() == null) {
+                        return;
+                    }
                     String target = intent.getComponent().getPackageName();
                     if(targetIsAllow(target)) {
                         // 拿不到action，先放了

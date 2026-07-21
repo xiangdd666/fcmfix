@@ -184,7 +184,8 @@ public abstract class XposedModule {
                         if (remotePreferences == null) {
                             throw new IllegalStateException("remotePreferences 不可用");
                         }
-                        allowList = remotePreferences.getStringSet("allowList", allowList == null ? new HashSet<>() : allowList);
+                        // 拷贝一份，避免直接持有 SharedPreferences 返回的不可变/受管集合
+                        allowList = new HashSet<>(remotePreferences.getStringSet("allowList", allowList == null ? new HashSet<>() : allowList));
                         if (allowList != null && "android".equals(getSelfPackageName())) {
                             printLog("[Modern Xposed API]onUpdateConfig allowList size: " + allowList.size());
                         }

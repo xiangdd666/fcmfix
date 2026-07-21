@@ -38,9 +38,9 @@ public class PowerkeeperFix extends XposedModule {
             Class<?> MilletPolicy = XposedHelpers.findClassIfExists("com.miui.powerkeeper.millet.MilletPolicy", classLoader);
 
             XC_MethodHook methodHook = new XC_MethodHook() {
-                protected void beforeHookedMethod(XC_MethodHook.MethodHookParam methodHookParam) throws Throwable {
-                    Field[] declaredFields = null;
-                    super.afterHookedMethod(methodHookParam);
+                // 注意：必须在 afterHookedMethod 里改字段，构造体执行完才能保留修改；
+                // 若写在 beforeHookedMethod，构造体会用初始值覆盖，修复等于空操作。
+                protected void afterHookedMethod(XC_MethodHook.MethodHookParam methodHookParam) throws Throwable {
                     boolean mSystemBlackList = false;
                     boolean whiteApps = false;
                     boolean mDataWhiteList = false;

@@ -111,7 +111,7 @@ public class BroadcastFix extends XposedModule {
                 }
             }
         }
-        if(targetMethod != null && intent_args_index != 0 & appOp_args_index != 0 && targetMethod.getParameters()[intent_args_index].getType() == Intent.class && targetMethod.getParameters()[appOp_args_index].getType() == int.class){
+        if(targetMethod != null && intent_args_index != 0 && appOp_args_index != 0 && targetMethod.getParameters()[intent_args_index].getType() == Intent.class && targetMethod.getParameters()[appOp_args_index].getType() == int.class){
             createBroadcastIntentLockedHooker(intent_args_index,appOp_args_index,targetMethod);
         } else {
             printLog("broadcastIntentLocked hook 位置查找失败，fcmfix将不会工作。");
