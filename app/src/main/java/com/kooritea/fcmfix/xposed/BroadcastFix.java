@@ -44,9 +44,25 @@ public class BroadcastFix extends XposedModule {
         if(Build.VERSION.SDK_INT >= 35){
             targetMethod = XposedUtils.tryFindMethodMostParam(classLoader,"com.android.server.am.BroadcastController","broadcastIntentLocked");
             if(targetMethod != null){
-                if(Build.VERSION.SDK_INT >= 35){
-                    intent_args_index = 3;
-                    appOp_args_index = 13;
+                // 优先用参数名检测（Android 16 兼容），名字不可用时回退到硬编码
+                Parameter[] params = targetMethod.getParameters();
+                for (int i = 0; i < params.length; i++) {
+                    if (params[i].getType() == Intent.class && "intent".equals(params[i].getName())) {
+                        intent_args_index = i;
+                    }
+                    if (params[i].getType() == int.class && "appOp".equals(params[i].getName())) {
+                        appOp_args_index = i;
+                    }
+                }
+                if (intent_args_index == 0 || appOp_args_index == 0) {
+                    // 参数名不可用，按 SDK 版本回退硬编码
+                    if(Build.VERSION.SDK_INT == 35){
+                        intent_args_index = 3;
+                        appOp_args_index = 13;
+                    } else if(Build.VERSION.SDK_INT >= 36){
+                        intent_args_index = 3;
+                        appOp_args_index = 13; // SDK 36+ 先沿用 35 的索引，不对再用 AMS 路径兜底
+                    }
                 }
             }
         }
@@ -54,58 +70,65 @@ public class BroadcastFix extends XposedModule {
             targetMethod = XposedUtils.tryFindMethodMostParam(classLoader,"com.android.server.am.ActivityManagerService","broadcastIntentLocked");
             if(targetMethod != null){
                 Parameter[] parameters = targetMethod.getParameters();
-                if(Build.VERSION.SDK_INT == Build.VERSION_CODES.Q){
-                    intent_args_index = 2;
-                    appOp_args_index = 9;
-                }else if(Build.VERSION.SDK_INT == Build.VERSION_CODES.R){
-                    intent_args_index = 3;
-                    appOp_args_index = 10;
-                }else if(Build.VERSION.SDK_INT == 31){
-                    intent_args_index = 3;
-                    if(parameters[11].getType() == int.class){
-                        appOp_args_index = 11;
+                // 优先用参数名检测（跨版本最可靠）
+                boolean foundByName = false;
+                for(int i = 0; i < parameters.length; i++){
+                    if("intent".equals(parameters[i].getName()) && parameters[i].getType() == Intent.class){
+                        intent_args_index = i;
                     }
-                    if(parameters[12].getType() == int.class){
-                        appOp_args_index = 12;
-                    }
-                }else if(Build.VERSION.SDK_INT == 32){
-                    intent_args_index = 3;
-                    if(parameters[11].getType() == int.class){
-                        appOp_args_index = 11;
-                    }
-                    if(parameters[12].getType() == int.class){
-                        appOp_args_index = 12;
-                    }
-                }else if(Build.VERSION.SDK_INT == 33){
-                    intent_args_index = 3;
-                    appOp_args_index = 12;
-                } else if(Build.VERSION.SDK_INT == 34){
-                    intent_args_index = 3;
-                    if(parameters[12].getType() == int.class){
-                        appOp_args_index = 12;
-                    }
-                    if(parameters[13].getType() == int.class){
-                        appOp_args_index = 13;
-                    }
-                } else if(Build.VERSION.SDK_INT >= 35){
-                    intent_args_index = 3;
-                    if(parameters[12].getType() == int.class){
-                        appOp_args_index = 12;
-                    }
-                    if(parameters[13].getType() == int.class){
-                        appOp_args_index = 13;
+                    if("appOp".equals(parameters[i].getName()) && parameters[i].getType() == int.class){
+                        appOp_args_index = i;
                     }
                 }
-                if(intent_args_index == 0 || appOp_args_index == 0){
-                    intent_args_index = 0;
-                    appOp_args_index = 0;
-                    // 根据参数名称查找，部分经过混淆的系统无效
-                    for(int i = 0; i < parameters.length; i++){
-                        if("appOp".equals(parameters[i].getName()) && parameters[i].getType() == int.class){
-                            appOp_args_index = i;
+                if (intent_args_index > 0 && appOp_args_index > 0) {
+                    foundByName = true;
+                }
+                // 参数名不可用时，按 SDK 版本回退硬编码
+                if(!foundByName){
+                    if(Build.VERSION.SDK_INT == Build.VERSION_CODES.Q){
+                        intent_args_index = 2;
+                        appOp_args_index = 9;
+                    }else if(Build.VERSION.SDK_INT == Build.VERSION_CODES.R){
+                        intent_args_index = 3;
+                        appOp_args_index = 10;
+                    }else if(Build.VERSION.SDK_INT == 31){
+                        intent_args_index = 3;
+                        if(parameters[11].getType() == int.class){
+                            appOp_args_index = 11;
                         }
-                        if("intent".equals(parameters[i].getName()) && parameters[i].getType() == Intent.class){
-                            intent_args_index = i;
+                        if(parameters[12].getType() == int.class){
+                            appOp_args_index = 12;
+                        }
+                    }else if(Build.VERSION.SDK_INT == 32){
+                        intent_args_index = 3;
+                        if(parameters[11].getType() == int.class){
+                            appOp_args_index = 11;
+                        }
+                        if(parameters[12].getType() == int.class){
+                            appOp_args_index = 12;
+                        }
+                    }else if(Build.VERSION.SDK_INT == 33){
+                        intent_args_index = 3;
+                        appOp_args_index = 12;
+                    } else if(Build.VERSION.SDK_INT == 34){
+                        intent_args_index = 3;
+                        if(parameters[12].getType() == int.class){
+                            appOp_args_index = 12;
+                        }
+                        if(parameters[13].getType() == int.class){
+                            appOp_args_index = 13;
+                        }
+                    } else if(Build.VERSION.SDK_INT >= 35){
+                        intent_args_index = 3;
+                        if(parameters[12].getType() == int.class){
+                            appOp_args_index = 12;
+                        }
+                        if(parameters[13].getType() == int.class){
+                            appOp_args_index = 13;
+                        }
+                        // Android 16 (SDK 36) 可能新增参数导致 appOp 后移
+                        if (Build.VERSION.SDK_INT >= 36 && parameters.length > 14 && parameters[14].getType() == int.class) {
+                            appOp_args_index = 14;
                         }
                     }
                 }

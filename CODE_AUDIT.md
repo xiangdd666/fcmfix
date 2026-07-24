@@ -164,5 +164,33 @@ system_server 侧 `isBootComplete` 要等 60 秒线程才置 true，期间所有
 - `refreshList()` / `onResume` / `onCreate` 兜底**移除对 `xposedService == null` 的提前返回**，始终用本地配置构建列表。
 - `onServiceBind` 时调用 `flushToRemote()`：把本地配置推到远程 Preferences 并发 `com.kooritea.fcmfix.update.config` 广播，使 system_server 侧 `onUpdateConfig` 能读到最新 allowList。
 - 移除"待应用队列"（`pendingAdd`/`pendingRemove`）与"XposedService 未连接"弹窗——本地写入永远成功，远程同步失败静默处理。
-**效果**：勾选一定存得住、读得回，与 `XposedService` 连不连上无关。若 `XposedService` 始终连不上，UI 仍正确，但 system_server 侧配置需等服务连上后 flush 才生效（属原模块的固有跨进程依赖）。
+**效果**：勾选一定存得住、读得回，与 `XposedService` 连不连上无关。若 `XposedService` 始终连不上，UI 仍正确，但 system_server 侧配���需等服务连上后 flush 才生效（属原模块的固有跨进程依赖）。
 
+---
+
+## 已修复记录（2026-07-24 修复会话）
+
+以下项已在本会话中直接修改源码修复：
+
+### #18（P0）BroadcastFix Android 16 (SDK 36) 参数索引硬编码导致核心 hook 静默失败
+**文件**：`BroadcastFix.java` → `startHookBroadcastIntentLocked()`
+**根因**：`BroadcastController` 路径对 SDK 35+ 硬编码 `intent_args_index=3, appOp_args_index=13`，`ActivityManagerService` 回退路径也只检查 `parameters[12-14]`。Android 16 系统服务参数顺序变化时，`appOp_args_index` 可能仍为 0，`intent_args_index != 0 && appOp_args_index != 0` 条件不满足 → hook 未安装 → 整个 FCM 唤醒链路断开。
+**修复**：
+- **BroadcastController 路径**：先用参数名（`intent`/`appOp`）匹配，不可用再回退硬编码
+- **AMS 回退路径**：同样参数名优先，硬编码兜底 + SDK 36 检查 `parameters[14]`
+- 效果：参数名可用（AOSP 设备）时自动适配任意版本；名字被混淆（OEM ROM）时靠硬编码兜底
+
+### #19（P0）system_server 侧配置加载强依赖 LSPosed 远程 Preferences
+**文件**：`XposedModule.java` → `onUpdateConfig()`
+**根因**：`XposedBridge.getRemotePreferences("config")` 在 Android 16 上频繁返回 null（LSPosed 服务不稳定），`onUpdateConfig()` 抛 `IllegalStateException` 后 `allowList` 保持 null，所有 hook 中 `targetIsAllow()` 返回 false → 等于什么都没放过。
+**修复**：远程 Preferences 不可用时，回退到通过 `context.createPackageContext("com.kooritea.fcmfix", CONTEXT_IGNORE_SECURITY)` 读取 fcmfix 自己的本地 `SharedPreferences`。system_server 具备此权限。失败时不再抛异常，改为打印日志 + 等待下次广播触发重试。
+
+### #20（P1）KeepNotification SDK 36 参数索引
+**文件**：`KeepNotification.java` → `startHook()`
+**修复**：将 `Build.VERSION.SDK_INT > 35` 改为 `>= 36` 显式分支，与 35 同等处理（`pkg=2, reason=7`），后续版本更新时方便单独调整。
+
+### #21（P1）scope.list 补上 com.google.android.gms
+**文件**：`META-INF/xposed/scope.list`
+**修复**：新增 `com.google.android.gms` 行，使 `ReconnectManagerFix` 的 GMS 侧 hook 默认生效，无需用户手动勾选。
+
+> ⚠️ 本机无 Android SDK，未编译验证；请在实机/有 SDK 环境出包后验证。

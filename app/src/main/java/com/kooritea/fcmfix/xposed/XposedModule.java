@@ -14,6 +14,7 @@ import android.os.Bundle;
 import android.os.UserManager;
 import android.util.Log;
 
+import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 import androidx.core.app.NotificationManagerCompat;
 
@@ -182,7 +183,13 @@ public abstract class XposedModule {
                     try {
                         SharedPreferences remotePreferences = XposedBridge.getRemotePreferences("config");
                         if (remotePreferences == null) {
-                            throw new IllegalStateException("remotePreferences 不可用");
+                            // LSPosed 远程通道不可用（Android 16 常见），回退到读取 fcmfix 自身本地配置
+                            remotePreferences = getFcmfixLocalPreferences();
+                        }
+                        if (remotePreferences == null) {
+                            printLog("无法读取配置（远程通道和本地回退均失败），等待下次广播触发");
+                            loadConfigThread = null;
+                            return;
                         }
                         // 拷贝一份，避免直接持有 SharedPreferences 返回的不可变/受管集合
                         allowList = new HashSet<>(remotePreferences.getStringSet("allowList", allowList == null ? new HashSet<>() : allowList));
@@ -200,6 +207,20 @@ public abstract class XposedModule {
                 }
             };
             loadConfigThread.start();
+        }
+    }
+
+    /** 读取 fcmfix 自身的本地 SharedPreferences，作为远程通道不可用时的回退 */
+    @Nullable
+    private static SharedPreferences getFcmfixLocalPreferences() {
+        try {
+            if (context == null) return null;
+            Context fcmfixContext = context.createPackageContext("com.kooritea.fcmfix",
+                    Context.CONTEXT_IGNORE_SECURITY);
+            return fcmfixContext.getSharedPreferences("config", Context.MODE_PRIVATE);
+        } catch (Throwable e) {
+            printLog("回退到本地配置失败: " + e.getMessage());
+            return null;
         }
     }
 

@@ -62,7 +62,7 @@ public class KeepNotification extends XposedModule{
                 pkg_args_index = 2;
                 reason_args_index = 7;
             }
-            if(Build.VERSION.SDK_INT > 35){
+            if(Build.VERSION.SDK_INT >= 36){
                 pkg_args_index = 2;
                 reason_args_index = 7;
             }
